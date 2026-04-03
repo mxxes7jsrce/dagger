@@ -1895,7 +1895,7 @@ func (r *Container) Entrypoint(ctx context.Context) ([]string, error) {
 	return response, q.Execute(ctx)
 }
 
-// Retrieves the value of the specified environment variable.
+// Retrieves the value of the specified persistent environment variable.
 func (r *Container) EnvVariable(ctx context.Context, name string) (string, error) {
 	if r.envVariable != nil {
 		return *r.envVariable, nil
@@ -1909,7 +1909,7 @@ func (r *Container) EnvVariable(ctx context.Context, name string) (string, error
 	return response, q.Execute(ctx)
 }
 
-// Retrieves the list of environment variables passed to commands.
+// Retrieves the list of persistent environment variables configured on the container.
 func (r *Container) EnvVariables(ctx context.Context) ([]EnvVariable, error) {
 	q := r.query.Select("envVariables")
 
@@ -3282,6 +3282,19 @@ func (r *Container) WithSecretVariable(name string, secret *Secret) *Container {
 	}
 }
 
+// Set a new non-secret environment variable for future execs without invalidating exec cache when only its value changes.
+//
+// This is an expert-only escape hatch. If a volatile value affects observable exec results, stale cached results may be reused.
+func (r *Container) WithVolatileVariable(name string, value string) *Container {
+	q := r.query.Select("withVolatileVariable")
+	q = q.Arg("name", name)
+	q = q.Arg("value", value)
+
+	return &Container{
+		query: q,
+	}
+}
+
 // Establish a runtime dependency from a container to a network service.
 //
 // The service will be started automatically when needed and detached when it is no longer needed, executing the default command if none is set.
@@ -3583,6 +3596,16 @@ func (r *Container) WithoutRegistryAuth(address string) *Container {
 // Retrieves this container minus the given environment variable containing the secret.
 func (r *Container) WithoutSecretVariable(name string) *Container {
 	q := r.query.Select("withoutSecretVariable")
+	q = q.Arg("name", name)
+
+	return &Container{
+		query: q,
+	}
+}
+
+// Retrieves this container minus the given volatile environment variable.
+func (r *Container) WithoutVolatileVariable(name string) *Container {
+	q := r.query.Select("withoutVolatileVariable")
 	q = q.Arg("name", name)
 
 	return &Container{
