@@ -1637,12 +1637,11 @@ func (src *ModuleSource) LoadContextFile(
 			return inst, fmt.Errorf("failed to select context directory subpath: %w", err)
 		}
 
-	case ModuleSourceKindDir:
+	case ModuleSourceKindDir, ModuleSourceKindBuiltin:
 		if !filepath.IsAbs(path) {
 			path = filepath.Join("/", src.SourceRootSubpath, path)
 		}
 
-		// Use the Dir context directory.
 		ctxDir := src.ContextDirectory
 
 		if err := dag.Select(ctx, ctxDir, &inst,
