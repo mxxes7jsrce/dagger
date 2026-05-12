@@ -48,9 +48,10 @@ func FastModuleSourceKindCheck(
 }
 
 type ParsedRefString struct {
-	Kind  ModuleSourceKind
-	Local *ParsedLocalRefString
-	Git   *ParsedGitRefString
+	Kind    ModuleSourceKind
+	Local   *ParsedLocalRefString
+	Git     *ParsedGitRefString
+	Builtin *ParsedBuiltinRefString
 }
 
 func ParseRefString(
@@ -61,6 +62,22 @@ func ParseRefString(
 ) (_ *ParsedRefString, rerr error) {
 	ctx, span := Tracer(ctx).Start(ctx, fmt.Sprintf("parseRefString: %s", refString), telemetry.Internal())
 	defer telemetry.EndWithCause(span, &rerr)
+
+	if refPin == "" {
+		entry, err := DefaultBuiltinModuleCatalog().Lookup(refString)
+		switch {
+		case err == nil:
+			return &ParsedRefString{
+				Kind: ModuleSourceKindBuiltin,
+				Builtin: &ParsedBuiltinRefString{
+					Name: entry.Name,
+				},
+			}, nil
+		case errors.Is(err, ErrBuiltinModuleNotFound):
+		default:
+			return nil, err
+		}
+	}
 
 	kind := FastModuleSourceKindCheck(refString, refPin)
 	switch kind {
@@ -117,6 +134,10 @@ func ParseRefString(
 
 type ParsedLocalRefString struct {
 	ModPath string
+}
+
+type ParsedBuiltinRefString struct {
+	Name string
 }
 
 type ParsedGitRefString struct {

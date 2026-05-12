@@ -73,6 +73,13 @@ func (s *moduleSourceSchema) Install(dag *dagql.Server) {
 				dagql.Arg("allowNotExists").Doc(`If true, do not error out if the provided ref string is a local path and does not exist yet. Useful when initializing new modules in directories that don't exist yet.`),
 				dagql.Arg("requireKind").Doc(`If set, error out if the ref string is not of the provided requireKind.`),
 			),
+		dagql.NodeFunc("builtinModuleSource", s.builtinModuleSource).
+			Doc(`Resolve a builtin module source by catalog name.`).
+			Args(
+				dagql.Arg("name").Doc(`The builtin module source catalog name.`),
+			),
+		dagql.Func("builtinModuleSources", s.builtinModuleSources).
+			Doc(`List builtin module source catalog entries visible to this client.`),
 	}.Install(dag)
 
 	dagql.Fields[*core.Directory]{
@@ -279,6 +286,7 @@ func (s *moduleSourceSchema) Install(dag *dagql.Server) {
 	}.Install(dag)
 
 	dagql.Fields[*core.SDKConfig]{}.Install(dag)
+	dagql.Fields[*core.BuiltinModuleSource]{}.Install(dag)
 	dagql.Fields[*modules.ModuleConfigClient]{}.Install(dag)
 
 	dagql.Fields[*core.GeneratedCode]{
@@ -307,6 +315,7 @@ func (s *moduleSourceSchema) moduleSource(
 	if err != nil {
 		return inst, fmt.Errorf("failed to get engine client: %w", err)
 	}
+
 	parsedRef, err := core.ParseRefString(ctx, core.NewCallerStatFS(bk), args.RefString, args.RefPin)
 	if err != nil {
 		return inst, err
@@ -327,11 +336,166 @@ func (s *moduleSourceSchema) moduleSource(
 		if err != nil {
 			return inst, err
 		}
+	case core.ModuleSourceKindBuiltin:
+		inst, err = s.builtinModuleSource(ctx, query, builtinModuleSourceArgs{Name: parsedRef.Builtin.Name})
+		if err != nil {
+			return inst, err
+		}
 	default:
 		return inst, fmt.Errorf("unknown module source kind: %s", parsedRef.Kind)
 	}
 
 	return inst, nil
+}
+
+type builtinModuleSourceArgs struct {
+	Name string
+}
+
+func (s *moduleSourceSchema) builtinModuleSource(
+	ctx context.Context,
+	query dagql.ObjectResult[*core.Query],
+	args builtinModuleSourceArgs,
+) (inst dagql.Result[*core.ModuleSource], err error) {
+	entry, err := core.DefaultBuiltinModuleCatalog().Lookup(args.Name)
+	if err != nil {
+		return inst, err
+	}
+
+	if entry.ManifestDigest == "" {
+		bk, err := query.Self().Engine(ctx)
+		if err != nil {
+			return inst, fmt.Errorf("failed to get engine client: %w", err)
+		}
+		parsedRef, err := core.ParseRefString(ctx, core.NewCallerStatFS(bk), entry.Source, "")
+		if err != nil {
+			return inst, err
+		}
+		if parsedRef.Kind != core.ModuleSourceKindGit {
+			return inst, fmt.Errorf("builtin module %q source %q must resolve to a git module source, got %q", entry.Name, entry.Source, parsedRef.Kind.HumanString())
+		}
+		return s.gitModuleSource(ctx, query, entry.Source, parsedRef.Git, "", false)
+	}
+
+	dag, err := query.Self().Server.Server(ctx)
+	if err != nil {
+		return inst, fmt.Errorf("failed to get dag server: %w", err)
+	}
+
+	var rootfs dagql.ObjectResult[*core.Directory]
+	if err := dag.Select(ctx, dag.Root(), &rootfs,
+		dagql.Selector{
+			Field: "_builtinContainer",
+			Args: []dagql.NamedInput{
+				{Name: "digest", Value: dagql.String(entry.ManifestDigest.String())},
+			},
+		},
+		dagql.Selector{
+			Field: "rootfs",
+		},
+	); err != nil {
+		return inst, fmt.Errorf("failed to import builtin module %q rootfs: %w", entry.Name, err)
+	}
+
+	contextDir := rootfs
+	if entry.FullRootfsSubpath != "" && entry.FullRootfsSubpath != "." && entry.FullRootfsSubpath != "/" {
+		if err := dag.Select(ctx, rootfs, &contextDir,
+			dagql.Selector{
+				Field: "directory",
+				Args: []dagql.NamedInput{
+					{Name: "path", Value: dagql.String(entry.FullRootfsSubpath)},
+				},
+			},
+		); err != nil {
+			return inst, fmt.Errorf("failed to select builtin module %q rootfs subpath %q: %w", entry.Name, entry.FullRootfsSubpath, err)
+		}
+	}
+
+	builtinSrc := &core.ModuleSource{
+		ConfigExists:      true,
+		SourceRootSubpath: entry.Subpath,
+		OriginalSubpath:   entry.Subpath,
+		ContextDirectory:  contextDir,
+		Kind:              core.ModuleSourceKindBuiltin,
+		Builtin:           entry.ModuleSourceMetadata(),
+	}
+	builtinSrc.Builtin.OriginalRootfs = contextDir
+
+	configPath := filepath.Join(builtinSrc.SourceRootSubpath, modules.Filename)
+	var configContents string
+	if err := dag.Select(ctx, contextDir, &configContents,
+		dagql.Selector{
+			Field: "file",
+			Args: []dagql.NamedInput{
+				{Name: "path", Value: dagql.String(configPath)},
+			},
+		},
+		dagql.Selector{Field: "contents"},
+	); err != nil {
+		return inst, fmt.Errorf("failed to load builtin module %q dagger config: %w", entry.Name, err)
+	}
+	if err := s.initFromModConfig([]byte(configContents), builtinSrc); err != nil {
+		return inst, err
+	}
+	if err := s.loadModuleSourceContext(ctx, builtinSrc); err != nil {
+		return inst, fmt.Errorf("failed to load builtin module source context: %w", err)
+	}
+
+	bk, err := query.Self().Engine(ctx)
+	if err != nil {
+		return inst, fmt.Errorf("failed to get engine client: %w", err)
+	}
+
+	var eg errgroup.Group
+	if builtinSrc.SDK != nil {
+		eg.Go(func() error {
+			var err error
+			builtinSrc.SDKImpl, err = sdk.NewLoader().SDKForModule(ctx, query.Self(), builtinSrc.SDK, builtinSrc)
+			if err != nil {
+				return fmt.Errorf("failed to load sdk for builtin module source: %w", err)
+			}
+			return nil
+		})
+	}
+	eg.Go(func() error {
+		return s.loadBlueprintModule(ctx, bk, builtinSrc)
+	})
+	builtinSrc.Dependencies = make([]dagql.ObjectResult[*core.ModuleSource], len(builtinSrc.ConfigDependencies))
+	for i, depCfg := range builtinSrc.ConfigDependencies {
+		eg.Go(func() error {
+			var err error
+			builtinSrc.Dependencies[i], err = core.ResolveDepToSource(ctx, bk, dag, builtinSrc, depCfg.Source, depCfg.Pin, depCfg.Name)
+			if err != nil {
+				return fmt.Errorf("failed to resolve dep to source: %w", err)
+			}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return inst, err
+	}
+
+	if err := builtinSrc.LoadUserDefaults(ctx); err != nil {
+		return inst, fmt.Errorf("load user defaults: %w", err)
+	}
+
+	return dagql.NewResultForCurrentCall(ctx, builtinSrc)
+}
+
+func (s *moduleSourceSchema) builtinModuleSources(
+	ctx context.Context,
+	query *core.Query,
+	args struct{},
+) ([]*core.BuiltinModuleSource, error) {
+	entries, err := core.DefaultBuiltinModuleCatalog().List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.BuiltinModuleSource, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.ModuleSourceMetadata())
+	}
+	return out, nil
 }
 
 //nolint:gocyclo
@@ -1126,6 +1290,28 @@ func (s *moduleSourceSchema) loadModuleSourceContext(
 				Args: []dagql.NamedInput{
 					{Name: "path", Value: dagql.String("/")},
 					{Name: "source", Value: dagql.NewID[*core.Directory](unfilteredContextDirID)},
+					{Name: "include", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(fullIncludePaths...))},
+				},
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+	case core.ModuleSourceKindBuiltin:
+		fullIncludePaths = append(fullIncludePaths, src.RebasedIncludePaths...)
+		contextDirID, err := src.ContextDirectory.ID()
+		if err != nil {
+			return fmt.Errorf("failed to get context directory ID: %w", err)
+		}
+
+		err = dag.Select(ctx, dag.Root(), &src.ContextDirectory,
+			dagql.Selector{Field: "directory"},
+			dagql.Selector{
+				Field: "withDirectory",
+				Args: []dagql.NamedInput{
+					{Name: "path", Value: dagql.String("/")},
+					{Name: "source", Value: dagql.NewID[*core.Directory](contextDirID)},
 					{Name: "include", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(fullIncludePaths...))},
 				},
 			},
