@@ -27,6 +27,7 @@ import (
 	"github.com/dagger/dagger/core"
 	"github.com/dagger/dagger/core/workspace"
 	"github.com/dagger/dagger/dagql"
+	"github.com/dagger/dagger/dagql/call"
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/engineutil"
 	serverresolver "github.com/dagger/dagger/engine/server/resolver"
@@ -228,12 +229,12 @@ func (s *containerSchema) Install(srv *dagql.Server) {
 				dagql.Arg("secret").Doc(`Identifier of the secret value.`),
 			),
 
-		dagql.NodeFuncWithDynamicInputs("withVolatileVariable", s.withVolatileVariable, s.withVolatileVariableCacheKey).
+		dagql.NodeFunc("withVolatileVariable", s.withVolatileVariable).
 			Doc(`Set a new non-secret environment variable for future execs without invalidating exec cache when only its value changes.`,
 				`This is an expert-only escape hatch. If a volatile value affects observable exec results, stale cached results may be reused.`).
 			Args(
 				dagql.Arg("name").Doc(`Name of the volatile variable (e.g., "CI_RUN_ID").`),
-				dagql.Arg("value").Sensitive().Doc(`Value of the volatile variable.`),
+				dagql.Arg("value").Doc(`Value of the volatile variable.`),
 			),
 
 		dagql.NodeFunc("withoutEnvVariable", s.withoutEnvVariable).
@@ -575,7 +576,7 @@ func (s *containerSchema) Install(srv *dagql.Server) {
 				dagql.Arg("err").Doc(`Message of the error to raise. If empty, the error will be ignored.`),
 			),
 
-		dagql.NodeFunc("withExec", s.withExec).
+		dagql.NodeFuncWithDynamicInputs("withExec", s.withExec, s.withExecCacheKey).
 			IsPersistable().
 			View(AllVersion).
 			Doc(`Execute a command in the container, and return a new snapshot of the container state after execution.`).
@@ -1383,6 +1384,114 @@ func (s *containerSchema) withExec(ctx context.Context, parent dagql.ObjectResul
 	return dagql.NewObjectResultForCurrentCall(ctx, srv, ctr)
 }
 
+const volatileExecExtraDigestLabel = "container.withExec.volatileEnv"
+
+func (s *containerSchema) withExecCacheKey(ctx context.Context, parent dagql.ObjectResult[*core.Container], _ containerExecArgs, req *dagql.CallRequest) error {
+	parentID, err := parent.RecipeID(ctx)
+	if err != nil {
+		return fmt.Errorf("volatile exec cache key: parent recipe ID: %w", err)
+	}
+	if !hasVolatileVariableMutations(parentID) {
+		return nil
+	}
+
+	parentDigest, volatileEnv, err := normalizedVolatileParentDigest(parentID)
+	if err != nil {
+		return fmt.Errorf("volatile exec cache key: normalize parent: %w", err)
+	}
+
+	cache, err := dagql.EngineCache(ctx)
+	if err != nil {
+		return err
+	}
+	reqID, err := cache.RecipeIDForCall(ctx, req.ResultCall)
+	if err != nil {
+		return fmt.Errorf("volatile exec cache key: request recipe ID: %w", err)
+	}
+	execDigest, err := reqID.DigestWithReceiverDigest(parentDigest)
+	if err != nil {
+		return fmt.Errorf("volatile exec cache key: digest exec: %w", err)
+	}
+
+	extraDigest := execDigest
+	if len(volatileEnv) > 0 {
+		inputs := []string{execDigest.String()}
+		core.WalkEnv(volatileEnv, func(name, _, _ string) {
+			inputs = append(inputs, name)
+		})
+		extraDigest = hashutil.HashStrings(inputs...)
+	}
+	req.ExtraDigests = append(req.ExtraDigests, call.ExtraDigest{
+		Digest: extraDigest,
+		Label:  volatileExecExtraDigestLabel,
+	})
+	return nil
+}
+
+func hasVolatileVariableMutations(id *call.ID) bool {
+	for cur := id; cur != nil; cur = cur.Receiver() {
+		switch cur.Field() {
+		case "withVolatileVariable", "withoutVolatileVariable":
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedVolatileParentDigest(id *call.ID) (digest.Digest, []string, error) {
+	if id == nil {
+		return "", nil, nil
+	}
+
+	receiverDigest, volatileEnv, err := normalizedVolatileParentDigest(id.Receiver())
+	if err != nil {
+		return "", nil, err
+	}
+
+	switch id.Field() {
+	case "withVolatileVariable":
+		name, err := callStringArg(id, "name")
+		if err != nil {
+			return "", nil, err
+		}
+		return receiverDigest, core.AddEnv(volatileEnv, name, ""), nil
+	case "withoutVolatileVariable":
+		name, err := callStringArg(id, "name")
+		if err != nil {
+			return "", nil, err
+		}
+		return receiverDigest, withoutEnvName(volatileEnv, name), nil
+	default:
+		dig, err := id.DigestWithReceiverDigest(receiverDigest)
+		if err != nil {
+			return "", nil, err
+		}
+		return dig, volatileEnv, nil
+	}
+}
+
+func withoutEnvName(env []string, name string) []string {
+	newEnv := []string{}
+	core.WalkEnv(env, func(k, _, entry string) {
+		if !shell.EqualEnvKeys(k, name) {
+			newEnv = append(newEnv, entry)
+		}
+	})
+	return newEnv
+}
+
+func callStringArg(id *call.ID, name string) (string, error) {
+	arg := id.Arg(name)
+	if arg == nil {
+		return "", fmt.Errorf("call %q missing string arg %q", id.Field(), name)
+	}
+	lit, ok := arg.Value().(*call.LiteralString)
+	if !ok {
+		return "", fmt.Errorf("call %q arg %q: expected string, got %T", id.Field(), name, arg.Value())
+	}
+	return lit.Value(), nil
+}
+
 func (s *containerSchema) stdout(ctx context.Context, parent dagql.ObjectResult[*core.Container], _ struct{}) (string, error) {
 	cache, err := dagql.EngineCache(ctx)
 	if err != nil {
@@ -1973,11 +2082,6 @@ func (s *containerSchema) withVolatileVariable(ctx context.Context, parent dagql
 		}
 	}
 	return ctr, nil
-}
-
-func (s *containerSchema) withVolatileVariableCacheKey(ctx context.Context, parent dagql.ObjectResult[*core.Container], args containerWithVolatileVariableArgs, req *dagql.CallRequest) error {
-	req.DoNotCache = true
-	return nil
 }
 
 type containerWithImageConfigMetadataArgs struct {
