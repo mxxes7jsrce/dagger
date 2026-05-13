@@ -10,10 +10,10 @@ import (
 )
 
 // The `VersionID` scalar type represents an identifier for an object of type Version.
-type VersionID string // version (../../../../version/main.go:40:6)
+type VersionID string // version (../../../../version/main.go:55:6)
 
 // Retrieve the binding value, as type Version
-func (r *Binding) AsVersion() *Version { // version (../../../../version/main.go:40:6)
+func (r *Binding) AsVersion() *Version { // version (../../../../version/main.go:55:6)
 	q := r.query.Select("asVersion")
 
 	return &Version{
@@ -22,7 +22,7 @@ func (r *Binding) AsVersion() *Version { // version (../../../../version/main.go
 }
 
 // Create or update a binding of type Version in the environment
-func (r *Env) WithVersionInput(name string, value *Version, description string) *Env { // version (../../../../version/main.go:40:6)
+func (r *Env) WithVersionInput(name string, value *Version, description string) *Env { // version (../../../../version/main.go:55:6)
 	assertNotNil("value", value)
 	q := r.query.Select("withVersionInput")
 	q = q.Arg("name", name)
@@ -35,7 +35,7 @@ func (r *Env) WithVersionInput(name string, value *Version, description string) 
 }
 
 // Declare a desired Version output to be assigned in the environment
-func (r *Env) WithVersionOutput(name string, description string) *Env { // version (../../../../version/main.go:40:6)
+func (r *Env) WithVersionOutput(name string, description string) *Env { // version (../../../../version/main.go:55:6)
 	q := r.query.Select("withVersionOutput")
 	q = q.Arg("name", name)
 	q = q.Arg("description", description)
@@ -46,7 +46,7 @@ func (r *Env) WithVersionOutput(name string, description string) *Env { // versi
 }
 
 // Load a Version from its ID.
-func (r *Query) LoadVersionFromID(id VersionID) *Version { // version (../../../../version/main.go:40:6)
+func (r *Query) LoadVersionFromID(id VersionID) *Version { // version (../../../../version/main.go:55:6)
 	q := r.query.Select("loadVersionFromID")
 	q = q.Arg("id", id)
 
@@ -60,14 +60,17 @@ type VersionOpts struct {
 	//
 	// A directory containing the git metadata for the artifact to be versioned.
 	//
-	GitParent *Directory // version (../../../../version/main.go:27:2)
+	GitParent *Directory // version (../../../../version/main.go:38:2)
 }
 
-// Shared logic for managing Dagger versions
+// New builds the Version helper from the contextual git metadata Dagger can
+// currently provide.
 //
-// In general, it attempts to follow go's psedudoversioning:
-// https://go.dev/doc/modules/version-numbers
-func (r *Query) Version(opts ...VersionOpts) *Version { // version (../../../../version/main.go:20:1)
+// Today that metadata arrives as a Directory filtered down to .git. That works
+// for ordinary clones where .git is a directory, but not for linked worktrees
+// where .git is a pointer file. In that case Git remains nil and the public
+// methods use their documented best-effort fallback behavior.
+func (r *Query) Version(opts ...VersionOpts) *Version { // version (../../../../version/main.go:31:1)
 	q := r.query.Select("version")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `gitParent` optional argument
@@ -81,7 +84,11 @@ func (r *Query) Version(opts ...VersionOpts) *Version { // version (../../../../
 	}
 }
 
-type Version struct { // version (../../../../version/main.go:40:6)
+// Version contains the local git repository used for version decisions.
+//
+// Git is private because callers should not depend on how the module currently
+// obtains workspace git state. The intended replacement is core Workspace.git().
+type Version struct { // version (../../../../version/main.go:55:6)
 	query *querybuilder.Selection
 
 	currentTag       *string
@@ -98,7 +105,11 @@ func (r *Version) WithGraphQLQuery(q *querybuilder.Selection) *Version {
 	}
 }
 
-func (r *Version) CurrentTag(ctx context.Context) (string, error) { // version (../../../../version/main.go:151:1)
+// CurrentTag returns the semver tag currently pointing at HEAD.
+//
+// An empty string means HEAD is not a semver-tagged release commit, or local git
+// metadata is unavailable.
+func (r *Version) CurrentTag(ctx context.Context) (string, error) { // version (../../../../version/main.go:206:1)
 	if r.currentTag != nil {
 		return *r.currentTag, nil
 	}
@@ -110,7 +121,11 @@ func (r *Version) CurrentTag(ctx context.Context) (string, error) { // version (
 	return response, q.Execute(ctx)
 }
 
-func (r *Version) Dirty(ctx context.Context) (bool, error) { // version (../../../../version/main.go:139:1)
+// Dirty reports whether the workspace has uncommitted git changes.
+//
+// When local git is unavailable, the module treats the checkout as dirty. That
+// keeps all no-git/worktree fallback versions out of the release-version shape.
+func (r *Version) Dirty(ctx context.Context) (bool, error) { // version (../../../../version/main.go:189:1)
 	if r.dirty != nil {
 		return *r.dirty, nil
 	}
@@ -171,8 +186,17 @@ func (r *Version) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
-// Return the tag to use when auto-downloading the engine image from the CLI
-func (r *Version) ImageTag(ctx context.Context) (string, error) { // version (../../../../version/main.go:113:1)
+// ImageTag returns the tag used by CLI auto-downloads for engine images.
+//
+// This is still the legacy image-tag policy: release commits use the current
+// semver tag, and untagged commits use a merge-base commit with main when one
+// can be found. The longer-term plan is to remove this separate image tag path
+// and use Version everywhere.
+//
+// FIXME: Remove ImageTag after engine/CLI build callers use Version for image
+// tagging too. Keeping a separate merge-base-based tag policy makes version
+// behavior harder to reason about and is not part of the Workspace.git facade.
+func (r *Version) ImageTag(ctx context.Context) (string, error) { // version (../../../../version/main.go:158:1)
 	if r.imageTag != nil {
 		return *r.imageTag, nil
 	}
@@ -184,8 +208,12 @@ func (r *Version) ImageTag(ctx context.Context) (string, error) { // version (..
 	return response, q.Execute(ctx)
 }
 
-// NextPatchVersion returns the next patch version after the latest stable semver git tag.
-func (r *Version) NextPatchVersion(ctx context.Context) (string, error) { // version (../../../../version/main.go:173:1)
+// NextPatchVersion returns the next patch version after the latest stable semver tag.
+//
+// With workspace git available, tags come from the local repository. Without it,
+// this explicitly uses the upstream Dagger repository as a temporary fallback so
+// direct calls continue to work from linked worktrees.
+func (r *Version) NextPatchVersion(ctx context.Context) (string, error) { // version (../../../../version/main.go:215:1)
 	if r.nextPatchVersion != nil {
 		return *r.nextPatchVersion, nil
 	}
@@ -197,8 +225,17 @@ func (r *Version) NextPatchVersion(ctx context.Context) (string, error) { // ver
 	return response, q.Execute(ctx)
 }
 
-// Generate a version string from the current context
-func (r *Version) Version(ctx context.Context) (string, error) { // version (../../../../version/main.go:46:1)
+// Version generates the release or dev version string for the current checkout.
+//
+// Release commits return their semver tag. Clean untagged commits use the next
+// patch version, the HEAD commit timestamp, and the HEAD commit SHA. Dirty
+// checkouts use the next patch version, wall-clock time, and a digest of the
+// uncommitted patch.
+//
+// If local git metadata cannot be loaded, this falls back to a digestless dirty
+// dev version. That fallback exists for linked worktrees until Workspace.git()
+// can provide worktree-aware git state.
+func (r *Version) Version(ctx context.Context) (string, error) { // version (../../../../version/main.go:70:1)
 	if r.version != nil {
 		return *r.version, nil
 	}
