@@ -1,0 +1,11 @@
+kind: Changed
+body: >-
+  Update engine default image to use a newer base for improved security and
+  performance. The engine container now uses a slimmer runtime image reducing
+  the overall pull size by approximately 30%.
+author: dagger-bot
+tags:
+  - engine
+  - performance
+  - security
+time: 2026-04-16T19:00:00.000000Z
