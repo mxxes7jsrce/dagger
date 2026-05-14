@@ -1,0 +1,8 @@
+kind: Fixed
+body: Fix engine connection timeout when using remote cache backends with slow network conditions
+time: 2026-04-16T18:00:00.000000Z
+custom:
+  Author: dagger-bot
+  PR: "847"
+  Issue: "823"
+  Migration: ""
