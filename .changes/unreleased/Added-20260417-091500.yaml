@@ -1,0 +1,11 @@
+kind: Added
+body: >-
+  Add support for custom registry mirrors in container image pulls,
+  allowing users to specify fallback registries via the Dagger engine
+  configuration for improved reliability in air-gapped environments.
+author: dagger-bot
+tags:
+  - engine
+  - registry
+  - configuration
+time: 2026-04-17T09:15:00.000000000Z
