@@ -1,0 +1,7 @@
+kind: Fixed
+body: Fix race condition in module loader when multiple dependencies are resolved concurrently
+time: 2026-04-17T10:30:00.000000000Z
+custom:
+  Author: dagger-bot
+  PR: "847"
+  Issue: "843"
