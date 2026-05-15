@@ -1,0 +1,12 @@
+kind: Added
+body: >-
+  Add support for custom cache volumes with configurable sharing modes,
+  allowing fine-grained control over cache persistence across pipeline runs
+author: dagger-dev
+time: 2026-04-17T14:00:00.000000000Z
+custom:
+  Author: dagger-dev
+  PR: "847"
+  Issue: "823"
+  Component: core
+  Breaking: "false"
